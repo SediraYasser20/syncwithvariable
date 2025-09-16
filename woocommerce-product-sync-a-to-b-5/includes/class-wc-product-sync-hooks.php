@@ -204,6 +204,15 @@ class WC_Product_Sync_Hooks {
                 if ( ! $variation ) {
                     continue;
                 }
+                // Get raw variation attributes. Keys may have 'attribute_' prefix.
+                $raw_attributes = $variation->get_variation_attributes();
+                $clean_attributes = array();
+                foreach ( $raw_attributes as $key => $value ) {
+                    // Remove 'attribute_' prefix if it exists to get the raw taxonomy.
+                    $clean_key = preg_replace( '/^attribute_/', '', $key );
+                    $clean_attributes[ $clean_key ] = $value;
+                }
+
                 $var_data = array(
                     'id'             => $variation->get_id(),
                     'sku'            => $variation->get_sku(),
@@ -214,7 +223,7 @@ class WC_Product_Sync_Hooks {
                     'manage_stock'   => $variation->get_manage_stock(),
                     'description'    => $variation->get_description(),
                     'menu_order'     => $variation->get_menu_order(),
-                    'attributes'     => $variation->get_variation_attributes(), // Keys are taxonomies, values are slugs
+                    'attributes'     => $clean_attributes, // Use the cleaned attributes.
                 );
                 $variations_data[] = $var_data;
             }

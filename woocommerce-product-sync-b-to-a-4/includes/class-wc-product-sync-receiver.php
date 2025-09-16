@@ -90,6 +90,10 @@ class WC_Product_Sync_Receiver_B {
             return new WP_Error( 'missing_id', __( 'Product ID is required.', 'wc-product-sync-b-to-a' ), array( 'status' => 400 ) );
         }
 
+        // Determine if the product is being created or updated for the category sync logic.
+        $product_post   = get_post( $desired_id );
+        $is_new_product = ( ! $product_post || 'product' !== $product_post->post_type );
+
         // Basic validation
         $existing = get_post( $desired_id );
         if ( $existing && 'product' !== $existing->post_type ) {
@@ -338,8 +342,8 @@ class WC_Product_Sync_Receiver_B {
             }
         }
 
-        // Handle categories
-        if ( ! empty( $data['categories'] ) && is_array( $data['categories'] ) ) {
+        // Handle categories only if the product is new.
+        if ( $is_new_product && ! empty( $data['categories'] ) && is_array( $data['categories'] ) ) {
             $category_ids = array();
             foreach ( $data['categories'] as $cat ) {
                 if ( isset( $cat['slug'] ) ) {
@@ -355,6 +359,11 @@ class WC_Product_Sync_Receiver_B {
         }
 
         $product->save();
+
+        // Clear caches (transients) for the product to ensure front-end displays updated data.
+        if ( function_exists( 'wc_delete_product_transients' ) ) {
+            wc_delete_product_transients( $desired_id );
+        }
 
         if ( class_exists( 'WC_Product_Sync_Logger_B_To_A' ) ) {
             WC_Product_Sync_Logger_B_To_A::log( sprintf( 'Created/updated product with forced ID %d via custom endpoint.', $desired_id ), 'info' );
