@@ -296,7 +296,7 @@ class WC_Product_Sync_Receiver_B {
                             $taxonomy = wc_attribute_taxonomy_name( $key ); // e.g., 'pa_asynsync'
                             $this->ensure_term_exists( $taxonomy, sanitize_title( $value ), $value );
                             
-                            $var_attributes[ 'attribute_' . sanitize_title( $key ) ] = sanitize_text_field( $value );
+                            $var_attributes[ sanitize_title( $key ) ] = sanitize_text_field( $value );
                         }
                         $variation->set_attributes( $var_attributes );
                     }
