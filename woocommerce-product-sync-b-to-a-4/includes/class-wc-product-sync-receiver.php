@@ -388,8 +388,13 @@ class WC_Product_Sync_Receiver_B {
             }
         }
 
-        // Handle categories only if the product is new.
-        if ( $is_new_product && ! empty( $data['categories'] ) && is_array( $data['categories'] ) ) {
+        // Determine if we should sync categories.
+        // We sync if the product is new, OR if it's an existing product with no categories assigned yet.
+        $existing_terms         = wp_get_post_terms( $desired_id, 'product_cat' );
+        $should_sync_categories = ( $is_new_product || empty( $existing_terms ) );
+
+        // Handle categories only if the product is new OR has no categories.
+        if ( $should_sync_categories && ! empty( $data['categories'] ) && is_array( $data['categories'] ) ) {
             $category_ids = array();
             foreach ( $data['categories'] as $cat_data ) {
                 $slug        = isset( $cat_data['slug'] ) ? $cat_data['slug'] : '';
