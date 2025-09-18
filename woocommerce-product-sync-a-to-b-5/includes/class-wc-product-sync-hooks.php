@@ -161,41 +161,36 @@ class WC_Product_Sync_Hooks {
             'type'               => $product->get_type(),
         );
 
-        // --- Type-Specific Data ---
-        if ( $product->is_type( 'variable' ) ) {
-            // Get attributes - send taxonomy name and slug options
-            $attributes = array();
-            foreach ( $product->get_attributes() as $attribute ) {
-                if ( ! $attribute->get_variation() ) {
-                    continue;
-                }
-                $attr_data = array(
-                    'name'     => $attribute->get_taxonomy(), // Send full taxonomy e.g., 'pa_asynsync'
-                    'options'  => array(), // Will populate with slugs
-                    'visible'  => $attribute->get_visible(),
-                    'variation' => $attribute->get_variation(),
-                );
-                // Handle options: convert term IDs to slugs
-                $options = array();
-                if ( $attribute->is_taxonomy() ) {
-                    foreach ( $attribute->get_options() as $option ) {
-                        if ( is_numeric( $option ) ) {
-                            $term = get_term( $option, $attribute->get_taxonomy() );
-                            if ( $term && ! is_wp_error( $term ) ) {
-                                $options[] = $term->slug;
-                            }
-                        } else {
-                            $options[] = $option; // Already a slug or custom value
+        // --- Attribute Data (for all product types) ---
+        $attributes_data = array();
+        foreach ( $product->get_attributes() as $attribute ) {
+            $options = array();
+            if ( $attribute->is_taxonomy() ) {
+                $term_ids = $attribute->get_options();
+                if ( ! empty( $term_ids ) ) {
+                    foreach ( $term_ids as $term_id ) {
+                        $term = get_term( $term_id, $attribute->get_name() );
+                        if ( $term && ! is_wp_error( $term ) ) {
+                            $options[] = $term->slug;
                         }
                     }
-                } else {
-                    $options = array_map( 'sanitize_text_field', $attribute->get_options() );
                 }
-                $attr_data['options'] = $options;
-                $attributes[] = $attr_data;
+            } else {
+                // It's a custom attribute with raw values.
+                $options = $attribute->get_options();
             }
-            $data['attributes'] = $attributes;
 
+            $attributes_data[] = array(
+                'name'      => $attribute->get_name(), // e.g., 'pa_color' or 'Custom Attr'.
+                'options'   => $options,
+                'visible'   => $attribute->get_visible(),
+                'variation' => $attribute->get_variation(),
+            );
+        }
+        $data['attributes'] = $attributes_data;
+
+        // --- Type-Specific Data ---
+        if ( $product->is_type( 'variable' ) ) {
             // Get variations
             $variations_data = array();
             $variation_ids = $product->get_children();
@@ -204,6 +199,15 @@ class WC_Product_Sync_Hooks {
                 if ( ! $variation ) {
                     continue;
                 }
+                // Get raw variation attributes. Keys may have 'attribute_' prefix.
+                $raw_attributes = $variation->get_variation_attributes();
+                $clean_attributes = array();
+                foreach ( $raw_attributes as $key => $value ) {
+                    // Remove 'attribute_' prefix if it exists to get the raw taxonomy.
+                    $clean_key = preg_replace( '/^attribute_/', '', $key );
+                    $clean_attributes[ $clean_key ] = $value;
+                }
+
                 $var_data = array(
                     'id'             => $variation->get_id(),
                     'sku'            => $variation->get_sku(),
@@ -214,7 +218,7 @@ class WC_Product_Sync_Hooks {
                     'manage_stock'   => $variation->get_manage_stock(),
                     'description'    => $variation->get_description(),
                     'menu_order'     => $variation->get_menu_order(),
-                    'attributes'     => $variation->get_variation_attributes(), // Keys are taxonomies, values are slugs
+                    'attributes'     => $clean_attributes, // Use the cleaned attributes.
                 );
                 $variations_data[] = $var_data;
             }
@@ -229,13 +233,35 @@ class WC_Product_Sync_Hooks {
         }
 
         // --- Taxonomy Data ---
-        $category_ids = $product->get_category_ids();
+        $assigned_category_ids = $product->get_category_ids();
+        $all_category_ids      = array();
+
+        // For each assigned category, walk up the tree to include all parents.
+        if ( ! empty( $assigned_category_ids ) ) {
+            foreach ( $assigned_category_ids as $cat_id ) {
+                $ancestor_ids       = get_ancestors( $cat_id, 'product_cat' );
+                $all_category_ids = array_merge( $all_category_ids, $ancestor_ids, array( $cat_id ) );
+            }
+        }
+        $all_category_ids = array_unique( $all_category_ids );
+
         $data['categories'] = array();
-        if ( ! empty( $category_ids ) ) {
-            foreach ( $category_ids as $cat_id ) {
+        if ( ! empty( $all_category_ids ) ) {
+            foreach ( $all_category_ids as $cat_id ) {
                 $term = get_term( $cat_id, 'product_cat' );
                 if ( $term && ! is_wp_error( $term ) ) {
-                    $data['categories'][] = array( 'slug' => $term->slug, 'name' => $term->name );
+                    $parent_slug = '';
+                    if ( $term->parent ) {
+                        $parent_term = get_term( $term->parent, 'product_cat' );
+                        if ( $parent_term && ! is_wp_error( $parent_term ) ) {
+                            $parent_slug = $parent_term->slug;
+                        }
+                    }
+                    $data['categories'][] = array(
+                        'slug'   => $term->slug,
+                        'name'   => $term->name,
+                        'parent' => $parent_slug,
+                    );
                 }
             }
         }

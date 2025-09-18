@@ -59,6 +59,48 @@ class WC_Product_Sync_Receiver_B {
         return $new_term['term_id'];
     }
 
+
+    /**
+     * Finds a specific term by its slug and its parent's slug.
+     * This is necessary to distinguish between terms that have the same slug but different parents.
+     *
+     * @param string $slug The slug of the term to find.
+     * @param string $parent_slug The slug of the parent term.
+     * @return \WP_Term|null The found term object or null if not found.
+     */
+    private function find_term_by_slug_and_parent( $slug, $parent_slug ) {
+        $args = array(
+            'taxonomy'   => 'product_cat',
+            'slug'       => $slug,
+            'hide_empty' => false,
+        );
+        $terms = get_terms( $args );
+
+        if ( empty( $terms ) || is_wp_error( $terms ) ) {
+            return null;
+        }
+
+        foreach ( $terms as $term ) {
+            $parent_term_id = $term->parent;
+            if ( empty( $parent_slug ) ) {
+                // We are looking for a top-level term.
+                if ( $parent_term_id == 0 ) {
+                    return $term;
+                }
+            } else {
+                // We are looking for a child term.
+                if ( $parent_term_id != 0 ) {
+                    $parent_term = get_term( $parent_term_id, 'product_cat' );
+                    if ( $parent_term && ! is_wp_error( $parent_term ) && $parent_term->slug === $parent_slug ) {
+                        return $term;
+                    }
+                }
+            }
+        }
+
+        return null; // No exact match found.
+    }
+
     public function __construct() {
         add_action( 'rest_api_init', array( $this, 'register_routes' ) );
     }
@@ -89,6 +131,10 @@ class WC_Product_Sync_Receiver_B {
         if ( ! $desired_id ) {
             return new WP_Error( 'missing_id', __( 'Product ID is required.', 'wc-product-sync-b-to-a' ), array( 'status' => 400 ) );
         }
+
+        // Determine if the product is being created or updated for the category sync logic.
+        $product_post   = get_post( $desired_id );
+        $is_new_product = ( ! $product_post || 'product' !== $product_post->post_type );
 
         // Basic validation
         $existing = get_post( $desired_id );
@@ -186,6 +232,39 @@ class WC_Product_Sync_Receiver_B {
         $options = get_option( 'wc_product_sync_b_to_a_settings' );
         $price_sync_mode = isset( $options['price_sync_mode'] ) ? $options['price_sync_mode'] : 'sync_normal';
 
+        // --- Attributes (for all product types) ---
+        if ( ! empty( $data['attributes'] ) && is_array( $data['attributes'] ) ) {
+            $attributes = array();
+            foreach ( $data['attributes'] as $attr_data ) {
+                $attribute = new WC_Product_Attribute();
+                $attribute->set_name( $attr_data['name'] );
+
+                // If it's a taxonomy, ensure terms exist and set options as slugs.
+                $is_taxonomy = ( 0 === strpos( $attr_data['name'], 'pa_' ) );
+                if ( $is_taxonomy ) {
+                    $option_slugs = (array) $attr_data['options'];
+                    // Ensure the attribute itself exists as a taxonomy
+                    if ( function_exists( 'wc_create_attribute' ) ) {
+                        wc_create_attribute( array( 'name' => str_replace( 'pa_', '', $attr_data['name'] ), 'slug' => str_replace( 'pa_', '', $attr_data['name'] ) ) );
+                    }
+
+                    foreach ( $option_slugs as $slug ) {
+                        // Ensure the term exists on Site B.
+                        $this->ensure_term_exists( $attr_data['name'], $slug );
+                    }
+                    $attribute->set_options( $option_slugs );
+                } else {
+                    // It's a custom attribute, so options are just text values.
+                    $attribute->set_options( (array) $attr_data['options'] );
+                }
+
+                $attribute->set_visible( isset( $attr_data['visible'] ) ? (bool) $attr_data['visible'] : false );
+                $attribute->set_variation( isset( $attr_data['variation'] ) ? (bool) $attr_data['variation'] : false );
+                $attributes[] = $attribute;
+            }
+            $product->set_attributes( $attributes );
+        }
+
         // Handle simple products or non-variable
         if ( 'simple' === $type || 'variable' !== $type ) {
             // Set prices based on mode
@@ -213,35 +292,6 @@ class WC_Product_Sync_Receiver_B {
             }
         } else {
             // Handle variable products
-            // First, ensure attribute taxonomies exist and create terms for options
-            if ( ! empty( $data['attributes'] ) && is_array( $data['attributes'] ) ) {
-                foreach ( $data['attributes'] as $attr ) {
-                    $attr_name = sanitize_text_field( $attr['name'] );
-                    $taxonomy = wc_attribute_taxonomy_name( $attr_name ); // Convert to taxonomy slug if needed, but assuming it's already 'pa_...'
-                    
-                    // Create terms for options if taxonomy-based
-                    if ( ! empty( $attr['options'] ) && is_array( $attr['options'] ) ) {
-                        foreach ( $attr['options'] as $option_slug ) {
-                            $this->ensure_term_exists( $taxonomy, sanitize_title( $option_slug ), $option_slug );
-                        }
-                    }
-                }
-            }
-
-            // Set attributes (now with terms existing)
-            if ( ! empty( $data['attributes'] ) && is_array( $data['attributes'] ) ) {
-                $attributes = array();
-                foreach ( $data['attributes'] as $attr ) {
-                    $attribute = new WC_Product_Attribute();
-                    $attribute->set_name( sanitize_text_field( $attr['name'] ) );
-                    $attribute->set_options( array_map( 'sanitize_text_field', (array) $attr['options'] ) );
-                    $attribute->set_variation( isset( $attr['variation'] ) ? (bool) $attr['variation'] : true );
-                    $attribute->set_visible( isset( $attr['visible'] ) ? (bool) $attr['visible'] : false );
-                    $attributes[ strtolower( $attribute->get_name() ) ] = $attribute;
-                }
-                $product->set_attributes( $attributes );
-            }
-
             // Then, handle variations
             if ( ! empty( $data['variations'] ) && is_array( $data['variations'] ) ) {
                 foreach ( $data['variations'] as $var_data ) {
@@ -296,7 +346,7 @@ class WC_Product_Sync_Receiver_B {
                             $taxonomy = wc_attribute_taxonomy_name( $key ); // e.g., 'pa_asynsync'
                             $this->ensure_term_exists( $taxonomy, sanitize_title( $value ), $value );
                             
-                            $var_attributes[ 'attribute_' . sanitize_title( $key ) ] = sanitize_text_field( $value );
+                            $var_attributes[ sanitize_title( $key ) ] = sanitize_text_field( $value );
                         }
                         $variation->set_attributes( $var_attributes );
                     }
@@ -338,23 +388,33 @@ class WC_Product_Sync_Receiver_B {
             }
         }
 
-        // Handle categories
+        // Handle categories on every sync.
         if ( ! empty( $data['categories'] ) && is_array( $data['categories'] ) ) {
             $category_ids = array();
-            foreach ( $data['categories'] as $cat ) {
-                if ( isset( $cat['slug'] ) ) {
-                    $term = get_term_by( 'slug', $cat['slug'], 'product_cat' );
-                    if ( $term && ! is_wp_error( $term ) ) {
+            foreach ( $data['categories'] as $cat_data ) {
+                $slug        = isset( $cat_data['slug'] ) ? $cat_data['slug'] : '';
+                $parent_slug = isset( $cat_data['parent'] ) ? $cat_data['parent'] : '';
+
+                if ( ! empty( $slug ) ) {
+                    $term = $this->find_term_by_slug_and_parent( $slug, $parent_slug );
+                    if ( $term ) {
                         $category_ids[] = $term->term_id;
                     }
                 }
             }
+
+            // Use wp_set_object_terms to assign all categories at once.
             if ( ! empty( $category_ids ) ) {
-                wp_set_object_terms( $desired_id, $category_ids, 'product_cat' );
+                wp_set_object_terms( $desired_id, array_unique( $category_ids ), 'product_cat' );
             }
         }
 
         $product->save();
+
+        // Clear caches (transients) for the product to ensure front-end displays updated data.
+        if ( function_exists( 'wc_delete_product_transients' ) ) {
+            wc_delete_product_transients( $desired_id );
+        }
 
         if ( class_exists( 'WC_Product_Sync_Logger_B_To_A' ) ) {
             WC_Product_Sync_Logger_B_To_A::log( sprintf( 'Created/updated product with forced ID %d via custom endpoint.', $desired_id ), 'info' );
